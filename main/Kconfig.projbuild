@@ -1,0 +1,42 @@
+menu "Wastafel IoT Configuration"
+
+    config WASTAFEL_WIFI_SSID
+        string "WiFi SSID"
+        default "YOUR_WIFI_SSID"
+        help
+            WiFi network name to connect to.
+
+    config WASTAFEL_WIFI_PASSWORD
+        string "WiFi Password"
+        default "YOUR_WIFI_PASSWORD"
+        help
+            WiFi network password.
+
+    config WASTAFEL_MQTT_BROKER_URI
+        string "MQTT Broker URI"
+        default "mqtt://mqtt.eclipseprojects.io"
+        help
+            URI of the MQTT broker for telemetry data.
+            Examples: mqtt://broker.hivemq.com, mqtt://192.168.1.100
+
+    config WASTAFEL_DEVICE_ID
+        string "Device ID"
+        default "sink01"
+        help
+            Unique device identifier used in MQTT topics.
+            Topic format: wastafel/{device_id}/telemetry
+
+    config WASTAFEL_BLYNK_AUTH
+        string "Blynk Auth Token"
+        default ""
+        help
+            Blynk IoT authentication token for data logging.
+            Leave empty to disable Blynk integration.
+
+    config WASTAFEL_BLYNK_SERVER
+        string "Blynk Server"
+        default "blynk.cloud"
+        help
+            Blynk server hostname.
+
+endmenu

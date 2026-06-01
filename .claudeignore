@@ -1,0 +1,4 @@
+# Jangan baca folder build karena sangat besar
+build/**
+# Jangan baca file log riset yang panjang kecuali diminta
+docs/agents/RESEARCH_LOG.md
