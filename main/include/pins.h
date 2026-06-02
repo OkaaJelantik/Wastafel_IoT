@@ -10,9 +10,7 @@
 
 #pragma once
 
-#define TOUCH_PAD_VERSION_SUPPRESS_DEPRECATION_WARNING
 #include "driver/gpio.h"
-#include "driver/touch_sens.h"
 
 // ============================================================================
 // HC-SR04 Sensor A — Hand Detection
@@ -23,8 +21,8 @@
 // ============================================================================
 // HC-SR04 Sensor B — Water Level Monitoring
 // ============================================================================
-#define WATER_TRIG_PIN      GPIO_NUM_14
-#define WATER_ECHO_PIN      GPIO_NUM_27
+#define WATER_TRIG_PIN      GPIO_NUM_5
+#define WATER_ECHO_PIN      GPIO_NUM_18
 
 // ============================================================================
 // I2C LCD 1602 via PCF8574 (Address 0x27)
@@ -36,7 +34,7 @@
 // ============================================================================
 // Relay — Water Pump Control (Active HIGH)
 // ============================================================================
-#define RELAY_PIN           GPIO_NUM_25
+#define RELAY_PIN           GPIO_NUM_26
 
 // ============================================================================
 // Touch Pad — Manual Refill Mode Trigger

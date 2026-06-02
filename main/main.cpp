@@ -47,10 +47,10 @@
 #include "esp_http_client.h"
 
 /* ── Peripheral Drivers ────────────────────────────────────────────── */
-#define TOUCH_PAD_VERSION_SUPPRESS_DEPRECATION_WARNING
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
-#include "driver/touch_sens.h"
+#include "driver/touch_pad.h"
+
 
 /* ── Project Components ────────────────────────────────────────────── */
 #include "hcsr04.h"
@@ -66,14 +66,15 @@ static const char *TAG = "WASTAFEL";
 // ── Hand Detection Thresholds (cm) ──
 static constexpr float HAND_ON_THRESHOLD    = 15.0f;   // Pump ON  when < 15cm
 static constexpr float HAND_OFF_THRESHOLD   = 22.0f;   // Pump OFF when > 22cm (hysteresis)
-static constexpr int   HAND_DEBOUNCE_COUNT  = 3;       // Consecutive readings to confirm OFF
+static constexpr uint32_t HAND_OFF_TIMEOUT_MS = 500;   // 500ms hand-away timeout
+static uint32_t s_hand_away_start_ms = 0;
 
 // ── Water Level Thresholds (cm) ──
 // NOTE: Distance is measured from sensor to water surface.
 //       LOWER distance = HIGHER water level.
-static constexpr float WATER_CRITICAL_CM    = 25.0f;   // Critical: water too low (far from sensor)
-static constexpr float WATER_LOW_CM         = 20.0f;   // Warning threshold
-static constexpr float WATER_FULL_CM        = 5.0f;    // Tank full (close to sensor)
+static constexpr float WATER_CRITICAL_CM    = 16.0f;   // Critical: water too low (far from sensor)
+static constexpr float WATER_LOW_CM         = 12.0f;   // Warning threshold
+static constexpr float TANK_AREA_CM2       = 56.72f;  // Tank surface area
 
 // ── Moving Average Filter ──
 static constexpr int   WATER_MA_WINDOW      = 10;      // Number of samples for smoothing
@@ -100,15 +101,24 @@ static constexpr int   OFFLINE_BUFFER_SIZE  = 30;       // Max buffered telemetr
 
 /**
  * @brief Operating mode of the smart sink
- *
- * STATE_NORMAL:   Standard operation — hand detection controls pump
- * STATE_CRITICAL: Water level below critical — pump hard-locked OFF
- * STATE_REFILL:   Manual refill mode — pump locked OFF, sensor detached
  */
 enum class SystemState {
-    STATE_NORMAL,
-    STATE_CRITICAL,
-    STATE_REFILL
+    STATE_IDLE,         // Ready, waiting for hands
+    STATE_PUMPING,      // Hand detected, pump active
+    STATE_STABILIZING,  // Waiting for water surface to settle
+    STATE_CALCULATING,  // Showing "Calculating..."
+    STATE_SHOW_RESULT,  // Showing final dispensed mL
+    STATE_CRITICAL,     // Water low
+    STATE_REFILL        // Manual refill mode
+};
+
+/**
+ * @brief Type of volume change action
+ */
+enum class VolumeAction {
+    NONE,
+    DISPENSED,          // Water pumped out
+    ADDED               // Water refilled
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -189,22 +199,26 @@ static void buffer_telemetry(float hand_dist, float water_dist, bool pump,
  *  GLOBAL STATE VARIABLES
  * ═══════════════════════════════════════════════════════════════════ */
 
-static touch_sensor_handle_t s_touch_handle = NULL;
-static touch_channel_handle_t s_chan_handle = NULL;
-
 // ── Hardware Instances ──
 static HCSR04  *s_hand_sensor  = nullptr;
 static HCSR04  *s_water_sensor = nullptr;
 static I2C_LCD *s_lcd          = nullptr;
 
 // ── System State ──
-static SystemState s_state      = SystemState::STATE_NORMAL;
+static SystemState s_state      = SystemState::STATE_IDLE;
 static bool        s_pump_on    = false;
-static int         s_off_debounce_count = 0;  // Hand-off debounce counter
+
+// ── Volume & Timing ──
+static float        s_dispensed_ml     = 0.0f;
+static float        s_initial_water_cm = 0.0f; // Level at start of pumping
+static uint32_t     s_calc_finish_ms   = 0;
+static VolumeAction s_last_action      = VolumeAction::NONE;
+static constexpr uint32_t CALC_DISPLAY_MS  = 3000;  // Show result for 3s
 
 // ── Sensor Readings ──
 static float s_hand_distance_cm  = -1.0f;   // Raw hand sensor
 static float s_water_distance_cm = -1.0f;   // Smoothed water level
+static float s_current_vol_ml    = 0.0f;    // Shared volume source of truth
 static MovingAverage s_water_filter;
 
 // ── Network State ──
@@ -340,10 +354,12 @@ static void mqtt_publish_telemetry(float hand_cm, float water_cm,
 
     const char *state_str;
     switch (state) {
-    case SystemState::STATE_NORMAL:   state_str = "NORMAL";   break;
-    case SystemState::STATE_CRITICAL: state_str = "CRITICAL"; break;
-    case SystemState::STATE_REFILL:   state_str = "REFILL";   break;
-    default:                          state_str = "UNKNOWN";  break;
+    case SystemState::STATE_IDLE:        state_str = "IDLE";        break;
+    case SystemState::STATE_PUMPING:     state_str = "PUMPING";     break;
+    case SystemState::STATE_CALCULATING: state_str = "CALCULATING"; break;
+    case SystemState::STATE_CRITICAL:    state_str = "CRITICAL";    break;
+    case SystemState::STATE_REFILL:      state_str = "REFILL";      break;
+    default:                             state_str = "UNKNOWN";     break;
     }
 
     char payload[256];
@@ -469,57 +485,27 @@ static void pump_set(bool on) {
     gpio_set_level(RELAY_PIN, on ? 1 : 0);
 }
 
-#define TOUCH_PAD_VERSION_SUPPRESS_DEPRECATION_WARNING
-#include "driver/gpio.h"
-#include "driver/i2c_master.h"
-#include "driver/touch_sens.h"
-
-// Define for compatibility if still needed
-#include "hal/touch_sensor_legacy_types.h"
-
 /**
  * @brief Initialize the capacitive touch pad for refill mode trigger
  */
 static void touch_init(void) {
-    touch_sensor_config_t sens_cfg = {
-        .power_on_wait_us = 256,
-        .meas_interval_us = 320.0,
-        .intr_trig_mode = TOUCH_INTR_TRIG_ON_BELOW_THRESH,
-        .intr_trig_group = TOUCH_INTR_TRIG_GROUP_BOTH,
-        .sample_cfg_num = 1,
-        .sample_cfg = (touch_sensor_sample_config_t[]) {
-            {
-                .charge_duration_ms = 5.0,
-                .charge_volt_lim_h = TOUCH_VOLT_LIM_H_1V7,
-                .charge_volt_lim_l = TOUCH_VOLT_LIM_L_0V5,
-            }
-        }
-    };
-    ESP_ERROR_CHECK(touch_sensor_new_controller(&sens_cfg, &s_touch_handle));
-
-    touch_channel_config_t chan_cfg = {
-        .abs_active_thresh = {TOUCH_THRESHOLD},
-        .charge_speed = TOUCH_CHARGE_SPEED_7,
-        .init_charge_volt = TOUCH_INIT_CHARGE_VOLT_DEFAULT,
-        .group = TOUCH_CHAN_TRIG_GROUP_BOTH,
-    };
-    ESP_ERROR_CHECK(touch_sensor_new_channel(s_touch_handle, TOUCH_REFILL_PAD, &chan_cfg, &s_chan_handle));
-    
-    ESP_ERROR_CHECK(touch_sensor_enable(s_touch_handle));
-    ESP_ERROR_CHECK(touch_sensor_start_continuous_scanning(s_touch_handle));
-    
-    ESP_LOGI(TAG, "Touch pad initialized on GPIO%d (PAD%d)",
+    ESP_LOGI(TAG, "Initializing legacy touch_pad on GPIO%d (PAD%d)",
              TOUCH_REFILL_GPIO, TOUCH_REFILL_PAD);
+             
+    touch_pad_init();
+    touch_pad_config((touch_pad_t)TOUCH_REFILL_PAD, 0);
+    touch_pad_set_voltage(TOUCH_HVOLT_2V7, TOUCH_LVOLT_0V5, TOUCH_HVOLT_ATTEN_1V);
 }
 
 /**
  * @brief Read touch pad and return true if touched
  */
 static bool touch_is_pressed(void) {
-    if (!s_chan_handle) return false;
-    uint32_t value = 0;
-    ESP_ERROR_CHECK(touch_channel_read_data(s_chan_handle, TOUCH_CHAN_DATA_TYPE_RAW, &value));
-    return (value < TOUCH_THRESHOLD);
+    uint16_t val;
+    touch_pad_read((touch_pad_t)TOUCH_REFILL_PAD, &val);
+    // Log occasionally for calibration if needed
+    // ESP_LOGD(TAG, "Touch: %d", val);
+    return (val < 400); 
 }
 
 /**
@@ -581,27 +567,34 @@ static void sensor_task(void *pvParams) {
     TickType_t last_wake = xTaskGetTickCount();
 
     while (true) {
-        /* ── 1. Trigger both sensors ─────────────────────────────── */
-        s_hand_sensor->trigger();
-        s_water_sensor->trigger();
-
-        /* Wait for echo return (max ~25ms for 4m range) */
-        vTaskDelay(pdMS_TO_TICKS(30));
-
-        /* ── 2. Read hand sensor (raw) ───────────────────────────── */
-        float hand_raw = s_hand_sensor->get_distance_cm();
-        if (hand_raw > 0) {
-            s_hand_distance_cm = hand_raw;
+        /* ── 1. Read Hand Sensor ────────────────────────────────── */
+        if (s_hand_sensor) {
+            s_hand_sensor->trigger();
+            vTaskDelay(pdMS_TO_TICKS(40)); // Wait for echo
+            float hand_raw = s_hand_sensor->get_distance_cm();
+            if (hand_raw > 0) {
+                s_hand_distance_cm = hand_raw;
+                ESP_LOGD(TAG, "Hand: %.1f cm", hand_raw);
+            }
         }
 
-        /* ── 3. Read water sensor (filtered via moving average) ──── */
-        float water_raw = s_water_sensor->get_distance_cm();
-        if (water_raw > 0) {
-            // Apply moving average filter to suppress noise & LCD flicker
-            s_water_distance_cm = s_water_filter.add(water_raw);
+        /* ── 2. Read Water Sensor ────────────────────────────────── */
+        if (s_water_sensor) {
+            s_water_sensor->trigger();
+            vTaskDelay(pdMS_TO_TICKS(30)); // Wait for echo
+            float water_raw = s_water_sensor->get_distance_cm();
+            if (water_raw > 0) {
+                // Apply moving average filter to suppress noise & LCD flicker
+                s_water_distance_cm = s_water_filter.add(water_raw);
+                
+                // Calculate current volume centrally to ensure consistency
+                float h = (WATER_CRITICAL_CM - s_water_distance_cm);
+                if (h < 0) h = 0;
+                s_current_vol_ml = h * TANK_AREA_CM2;
+            }
         }
 
-        /* ── 4. Read touch pad ────────────────────────────────────── */
+        /* ── 3. Read touch pad ────────────────────────────────────── */
         s_touch_pressed = touch_is_pressed();
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS));
@@ -622,102 +615,135 @@ static void sensor_task(void *pvParams) {
 
 static void control_task(void *pvParams) {
     TickType_t last_wake = xTaskGetTickCount();
-
-    // Debounce state for touch toggle detection
     bool prev_touch = false;
 
     while (true) {
-        /* ── 1. Touch toggle detection (rising edge) ────────────── */
         bool touch_now = s_touch_pressed;
         bool touch_rising = (touch_now && !prev_touch);
         prev_touch = touch_now;
 
-        /* ── 2. State Machine ────────────────────────────────────── */
         switch (s_state) {
 
-        case SystemState::STATE_NORMAL:
-            /*
-             * NORMAL MODE:
-             * - Check water level → transition to CRITICAL if too low
-             * - Check touch → transition to REFILL
-             * - Hand detection with hysteresis controls pump
-             */
-            if (s_water_distance_cm > WATER_CRITICAL_CM &&
-                s_water_distance_cm > 0) {
-                // Water critically low → hard lock pump OFF
-                pump_set(false);
-                s_off_debounce_count = 0;
-                s_state = SystemState::STATE_CRITICAL;
-                ESP_LOGW(TAG, "→ CRITICAL: Water level too low (%.1f cm)",
-                         s_water_distance_cm);
-                break;
-            }
-
-            if (touch_rising) {
-                // Enter refill mode → lock pump OFF
-                pump_set(false);
-                s_off_debounce_count = 0;
+        case SystemState::STATE_IDLE:
+            pump_set(false);
+            if (s_water_distance_cm > WATER_CRITICAL_CM && s_water_distance_cm > 0) {
+                s_initial_water_cm = s_water_distance_cm; 
                 s_state = SystemState::STATE_REFILL;
-                ESP_LOGI(TAG, "→ REFILL: Manual refill mode activated");
+                ESP_LOGW(TAG, "→ REFILL: Water critical, auto-entering refill mode");
                 break;
             }
-
-            /* ── Hand detection with hysteresis & debounce ──────── */
-            if (s_hand_distance_cm > 0 &&
-                s_hand_distance_cm < HAND_ON_THRESHOLD) {
-                // Hand detected within range → pump ON immediately
-                pump_set(true);
-                s_off_debounce_count = 0;
-            } else if (s_hand_distance_cm > HAND_OFF_THRESHOLD ||
-                       s_hand_distance_cm < 0) {
-                // Hand moved away past hysteresis band → debounce OFF
-                s_off_debounce_count++;
-                if (s_off_debounce_count >= HAND_DEBOUNCE_COUNT) {
-                    pump_set(false);
-                    s_off_debounce_count = HAND_DEBOUNCE_COUNT; // Clamp
-                }
+            if (touch_rising) {
+                s_initial_water_cm = s_water_distance_cm;
+                s_state = SystemState::STATE_REFILL;
+                break;
             }
-            // Between 15-22cm: maintain current state (hysteresis dead zone)
+            // Hand detection starts pumping
+            if (s_hand_distance_cm > 0 && s_hand_distance_cm < HAND_ON_THRESHOLD) {
+                // Use currently smoothed moving average as baseline
+                s_initial_water_cm = s_water_filter.get(); 
+                pump_set(true);
+                s_state = SystemState::STATE_PUMPING;
+            }
+            break;
+
+        case SystemState::STATE_PUMPING:
+            // CRITICAL LOCKOUT: Immediately interrupt if water level too low
+            if (s_water_distance_cm > WATER_CRITICAL_CM || s_water_distance_cm <= 0) {
+                pump_set(false);
+                s_initial_water_cm = s_water_distance_cm;
+                s_state = SystemState::STATE_REFILL;
+                ESP_LOGE(TAG, "→ REFILL: Water critical during pump, auto-entering refill mode");
+                break;
+            }
+            // Hand removal starts stabilization
+            if (s_hand_distance_cm > HAND_OFF_THRESHOLD || s_hand_distance_cm < 0) {
+                if (s_hand_away_start_ms == 0) {
+                    s_hand_away_start_ms = esp_log_timestamp(); // Start timer
+                } else if ((esp_log_timestamp() - s_hand_away_start_ms) > HAND_OFF_TIMEOUT_MS) {
+                    pump_set(false);
+                    s_calc_finish_ms = esp_log_timestamp();
+                    s_state = SystemState::STATE_STABILIZING;
+                    s_hand_away_start_ms = 0;
+                }
+            } else {
+                s_hand_away_start_ms = 0; // Hand re-detected, reset timer
+            }
+            break;
+
+        case SystemState::STATE_STABILIZING:
+            if (s_hand_distance_cm > 0 && s_hand_distance_cm < HAND_ON_THRESHOLD) {
+                s_state = SystemState::STATE_PUMPING;
+                pump_set(true);
+                break;
+            }
+            // Wait 2.0s for water to be perfectly still
+            if ((esp_log_timestamp() - s_calc_finish_ms) > 2000) {
+                // Calculate based on the centrally managed current volume
+                float final_h = (WATER_CRITICAL_CM - s_water_distance_cm);
+                float initial_h = (WATER_CRITICAL_CM - s_initial_water_cm);
+                float used_h = initial_h - final_h;
+                
+                // Hardening: Any used height < 0.3cm (approx 17mL) is treated as noise/zero
+                if (used_h < 0.3f) {
+                    used_h = 0;
+                    s_dispensed_ml = 0;
+                } else {
+                    s_dispensed_ml = used_h * TANK_AREA_CM2;
+                }
+                
+                s_last_action = VolumeAction::DISPENSED;
+                s_calc_finish_ms = esp_log_timestamp();
+                s_state = SystemState::STATE_CALCULATING;
+            }
+            break;
+
+        case SystemState::STATE_CALCULATING:
+            if (s_hand_distance_cm > 0 && s_hand_distance_cm < HAND_ON_THRESHOLD) {
+                s_state = SystemState::STATE_PUMPING;
+                pump_set(true);
+                break;
+            }
+            if ((esp_log_timestamp() - s_calc_finish_ms) > 1000) {
+                s_calc_finish_ms = esp_log_timestamp();
+                s_state = SystemState::STATE_SHOW_RESULT;
+            }
+            break;
+
+        case SystemState::STATE_SHOW_RESULT:
+            if (s_hand_distance_cm > 0 && s_hand_distance_cm < HAND_ON_THRESHOLD) {
+                s_state = SystemState::STATE_PUMPING;
+                pump_set(true);
+                break;
+            }
+            if ((esp_log_timestamp() - s_calc_finish_ms) > 3000) {
+                s_state = SystemState::STATE_IDLE;
+            }
             break;
 
         case SystemState::STATE_CRITICAL:
-            /*
-             * CRITICAL MODE:
-             * - Pump is HARD LOCKED OFF regardless of hand detection
-             * - Water level must recover above LOW threshold to exit
-             * - Touch can still enter REFILL mode
-             */
-            pump_set(false);  // Enforce pump OFF every cycle
-
-            if (touch_rising) {
-                s_state = SystemState::STATE_REFILL;
-                ESP_LOGI(TAG, "→ REFILL (from CRITICAL)");
-                break;
-            }
-
-            if (s_water_distance_cm > 0 &&
-                s_water_distance_cm < WATER_LOW_CM) {
-                // Water recovered above warning threshold
-                s_state = SystemState::STATE_NORMAL;
-                ESP_LOGI(TAG, "→ NORMAL: Water level recovered (%.1f cm)",
-                         s_water_distance_cm);
-            }
+            // This state is now bypassed by auto-transition to REFILL
+            s_state = SystemState::STATE_IDLE;
             break;
 
         case SystemState::STATE_REFILL:
-            /*
-             * REFILL MODE:
-             * - Pump is LOCKED OFF (water sensor is detached during refill)
-             * - Only exits via touch toggle
-             * - Display shows "REFILL MODE - LOCKED"
-             */
-            pump_set(false);  // STRICT: Force pump OFF during refill
-
+            pump_set(false);
+            // Exit via touch: calculate volume added
             if (touch_rising) {
-                // Exit refill mode → return to normal
-                s_state = SystemState::STATE_NORMAL;
-                s_off_debounce_count = 0;
-                ESP_LOGI(TAG, "→ NORMAL: Refill mode deactivated");
+                if (s_water_distance_cm > WATER_CRITICAL_CM || s_water_distance_cm <= 0) {
+                    ESP_LOGW(TAG, "Refill exit blocked: Water level still critical (%.1f cm)", s_water_distance_cm);
+                } else {
+                    float final_h = (WATER_CRITICAL_CM - s_water_distance_cm);
+                    float initial_h = (WATER_CRITICAL_CM - s_initial_water_cm);
+                    // Level increases = distance decreases
+                    float added_h = final_h - initial_h; 
+                    if (added_h < 0) added_h = 0;
+                    
+                    s_dispensed_ml = added_h * TANK_AREA_CM2;
+                    s_last_action = VolumeAction::ADDED;
+                    s_calc_finish_ms = esp_log_timestamp();
+                    s_state = SystemState::STATE_SHOW_RESULT;
+                    ESP_LOGI(TAG, "→ IDLE: Refill finished, Added: %.1f mL", s_dispensed_ml);
+                }
             }
             break;
         }
@@ -739,8 +765,6 @@ static void control_task(void *pvParams) {
 
 static void lcd_task(void *pvParams) {
     TickType_t last_wake = xTaskGetTickCount();
-
-    // Buffers for previous LCD content to avoid unnecessary rewrites
     char prev_line0[17] = {0};
     char prev_line1[17] = {0};
 
@@ -749,45 +773,66 @@ static void lcd_task(void *pvParams) {
         char line1[17] = {0};
 
         switch (s_state) {
+        case SystemState::STATE_IDLE: {
+            float current_height_cm = (s_water_distance_cm > 0) ? (WATER_CRITICAL_CM - s_water_distance_cm) : 0;
+            if (current_height_cm < 0) current_height_cm = 0;
+            float current_vol_ml = current_height_cm * TANK_AREA_CM2;
+
+            snprintf(line0, sizeof(line0), "SYSTEM READY    ");
+            snprintf(line1, sizeof(line1), "Capacity:%4.0f mL", current_vol_ml);
+            break;
+        }
+
+        case SystemState::STATE_PUMPING:
+            snprintf(line0, sizeof(line0), "PUMPING...      ");
+            snprintf(line1, sizeof(line1), "Dispensing Water");
+            break;
+
+        case SystemState::STATE_STABILIZING:
+            snprintf(line0, sizeof(line0), "PLEASE WAIT...  ");
+            snprintf(line1, sizeof(line1), "Stabilizing H2O ");
+            break;
+
+        case SystemState::STATE_CALCULATING:
+            snprintf(line0, sizeof(line0), "CALCULATING...  ");
+            snprintf(line1, sizeof(line1), "Please hold on  ");
+            break;
+
+        case SystemState::STATE_SHOW_RESULT:
+            if (s_last_action == VolumeAction::DISPENSED) {
+                snprintf(line0, sizeof(line0), "DISPENSED:      ");
+            } else {
+                snprintf(line0, sizeof(line0), "ADDED:          ");
+            }
+            snprintf(line1, sizeof(line1), "%7.1f mL      ", s_dispensed_ml);
+            break;
 
         case SystemState::STATE_REFILL:
-            /* ── REFILL MODE: Show dedicated lockout message ─────── */
-            snprintf(line0, sizeof(line0), "REFILL MODE     ");
-            snprintf(line1, sizeof(line1), "PUMP LOCKED OFF ");
-            break;
-
-        case SystemState::STATE_CRITICAL:
-            /* ── CRITICAL: Show warning + water reading ──────────── */
-            snprintf(line0, sizeof(line0), "!! LOW WATER !! ");
-            snprintf(line1, sizeof(line1), "W:%.0fcm LOCKED ",
-                     s_water_distance_cm);
-            break;
-
-        case SystemState::STATE_NORMAL:
-        default:
-            /* ── NORMAL: Show hand/water distances + pump state ──── */
-            if (s_hand_distance_cm > 0) {
-                snprintf(line0, sizeof(line0), "H:%.0fcm  W:%.0fcm",
-                         s_hand_distance_cm, s_water_distance_cm);
+            if (s_water_distance_cm > WATER_CRITICAL_CM || s_water_distance_cm <= 0) {
+                snprintf(line0, sizeof(line0), "!! LOW WATER !! ");
+                snprintf(line1, sizeof(line1), "PLEASE REFILL   ");
             } else {
-                snprintf(line0, sizeof(line0), "H:---   W:%.0fcm",
-                         s_water_distance_cm);
+                snprintf(line0, sizeof(line0), "REFILL MODE     ");
+                snprintf(line1, sizeof(line1), "PUMP LOCKED OFF ");
             }
-            snprintf(line1, sizeof(line1), "Pump:%s  %s",
-                     s_pump_on ? "ON " : "OFF",
-                     (s_water_distance_cm > WATER_LOW_CM) ? "LOW!" : "OK  ");
             break;
+
+        case SystemState::STATE_CRITICAL: {
+            snprintf(line0, sizeof(line0), "!! LOW WATER !! ");
+            snprintf(line1, sizeof(line1), "REFILL REQUIRED ");
+            break;
+        }
         }
 
         /* ── Only update LCD if content changed (prevents flicker) ── */
-        if (strncmp(line0, prev_line0, 16) != 0) {
+        if (strncmp(line0, prev_line0, 16) != 0 || strncmp(line1, prev_line1, 16) != 0) {
+            s_lcd->clear(); // Force clear on change to avoid artifacts
             s_lcd->set_cursor(0, 0);
             s_lcd->print(line0);
-            strncpy(prev_line0, line0, 16);
-        }
-        if (strncmp(line1, prev_line1, 16) != 0) {
             s_lcd->set_cursor(0, 1);
             s_lcd->print(line1);
+            
+            strncpy(prev_line0, line0, 16);
             strncpy(prev_line1, line1, 16);
         }
 
@@ -875,8 +920,8 @@ extern "C" void app_main(void) {
     /* ── 2. Initialize Hardware ──────────────────────────────────── */
     lcd_init();          // I2C LCD display
     sensors_init();      // HC-SR04 ultrasonic sensors (A + B)
-    // relay_init();        // Pump relay
-    // touch_init();        // Touch pad for refill mode
+    relay_init();        // Pump relay
+    touch_init();        // Back-to-basics touch polling
 
     /* ── 3. Initialize WiFi (non-blocking) ───────────────────────── */
     // wifi_init_sta();
@@ -896,8 +941,8 @@ extern "C" void app_main(void) {
                             nullptr, 0);
 
     // Control task — runs state machine at 10 Hz
-    // xTaskCreatePinnedToCore(control_task, "control", 4096, nullptr, 4,
-    //                         nullptr, 0);
+    xTaskCreatePinnedToCore(control_task, "control", 4096, nullptr, 4,
+                            nullptr, 0);
 
     // LCD task — updates display at 2 Hz
     xTaskCreatePinnedToCore(lcd_task,     "lcd",     4096, nullptr, 3,

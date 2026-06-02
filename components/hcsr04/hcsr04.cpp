@@ -121,7 +121,7 @@ esp_err_t HCSR04::init()
     /* ── 3. Create capture channel on the ECHO pin ───────────────
      *  Capture on BOTH edges so the ISR can distinguish rising
      *  (echo start) from falling (echo end) via edata->cap_edge.
-     *  Internal pull-up keeps the line stable when idle.            */
+     *  Internal pull-down keeps the line stable when idle or disconnected. */
     mcpwm_capture_channel_config_t cap_ch_cfg = {};
     cap_ch_cfg.gpio_num        = _echo_pin;
     cap_ch_cfg.prescale        = 1;           // No additional prescaling
@@ -130,6 +130,9 @@ esp_err_t HCSR04::init()
     ESP_RETURN_ON_ERROR(
         mcpwm_new_capture_channel(_cap_timer, &cap_ch_cfg, &_cap_channel),
         TAG, "Failed to create capture channel on GPIO %d", _echo_pin);
+    
+    // Explicitly set pull-down on Echo pin to prevent floating state
+    gpio_set_pull_mode(_echo_pin, GPIO_PULLDOWN_ONLY);
 
     /* ── 4. Register ISR callback with `this` as user context ──── */
     mcpwm_capture_event_callbacks_t cbs = {};
@@ -184,10 +187,13 @@ float HCSR04::get_distance_cm() const
     }
 
     /*
-     * Timer resolution is 1 MHz, so _pulse_ticks == echo duration in µs.
-     * Divide by 58 to convert round-trip µs to one-way centimetres.
+     * Get actual timer resolution (ESP32 is fixed at 80MHz).
+     * Convert raw ticks to microseconds based on this resolution.
      */
-    float pulse_us = static_cast<float>(_pulse_ticks);
+    uint32_t resolution = 0;
+    mcpwm_capture_timer_get_resolution(_cap_timer, &resolution);
+    
+    float pulse_us = (static_cast<float>(_pulse_ticks) * 1000000.0f) / static_cast<float>(resolution);
     float distance = pulse_us / US_TO_CM;
 
     /* Reject out-of-range readings (sensor spec: 2–400 cm) */

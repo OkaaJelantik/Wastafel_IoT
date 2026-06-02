@@ -14,3 +14,7 @@ idf_component_register(
     PRIV_REQUIRES
         esp_driver_touch_sens
 )
+
+# Disable Werror globally for this component to allow legacy drivers to build
+target_compile_options(${COMPONENT_LIB} PRIVATE "-Wno-error")
+
