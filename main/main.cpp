@@ -76,6 +76,11 @@ static constexpr float WATER_CRITICAL_CM    = 16.0f;   // Critical: water too lo
 static constexpr float WATER_LOW_CM         = 12.0f;   // Warning threshold
 static constexpr float TANK_AREA_CM2       = 56.72f;  // Tank surface area
 
+// ── Stabilization Hardening ──
+static constexpr float STABILITY_THRESHOLD_CM = 0.15f; // Max ripple spread allowed
+static constexpr uint32_t STABILITY_MIN_MS     = 1000; // Min wait for ripples to subside
+static constexpr uint32_t STABILITY_MAX_MS     = 5000; // Max wait before forcing result
+
 // ── Moving Average Filter ──
 static constexpr int   WATER_MA_WINDOW      = 10;      // Number of samples for smoothing
 
@@ -153,6 +158,30 @@ public:
     float get() const {
         if (_count == 0) return 0.0f;
         return _sum / static_cast<float>(_count);
+    }
+
+    /**
+     * @brief Calculate the difference between max and min in the current window
+     * High spread = rippling/unstable surface.
+     */
+    float get_spread() const {
+        if (_count == 0) return 0.0f;
+        float min_val = _buffer[0];
+        float max_val = _buffer[0];
+        for (int i = 1; i < _count; i++) {
+            if (_buffer[i] < min_val) min_val = _buffer[i];
+            if (_buffer[i] > max_val) max_val = _buffer[i];
+        }
+        return max_val - min_val;
+    }
+
+    /**
+     * @brief Check if the current reading is stable (low ripples)
+     * @param threshold_cm Max allowed spread in cm
+     */
+    bool is_stable(float threshold_cm) const {
+        if (_count < WATER_MA_WINDOW) return false; // Need a full window
+        return get_spread() < threshold_cm;
     }
 
 private:
@@ -662,6 +691,7 @@ static void control_task(void *pvParams) {
                 } else if ((esp_log_timestamp() - s_hand_away_start_ms) > HAND_OFF_TIMEOUT_MS) {
                     pump_set(false);
                     s_calc_finish_ms = esp_log_timestamp();
+                    s_last_action = VolumeAction::DISPENSED;
                     s_state = SystemState::STATE_STABILIZING;
                     s_hand_away_start_ms = 0;
                 }
@@ -676,24 +706,39 @@ static void control_task(void *pvParams) {
                 pump_set(true);
                 break;
             }
-            // Wait 2.0s for water to be perfectly still
-            if ((esp_log_timestamp() - s_calc_finish_ms) > 2000) {
-                // Calculate based on the centrally managed current volume
-                float final_h = (WATER_CRITICAL_CM - s_water_distance_cm);
-                float initial_h = (WATER_CRITICAL_CM - s_initial_water_cm);
-                float used_h = initial_h - final_h;
+            
+            {
+                uint32_t elapsed = esp_log_timestamp() - s_calc_finish_ms;
+                bool is_stable = s_water_filter.is_stable(STABILITY_THRESHOLD_CM);
                 
-                // Hardening: Any used height < 0.3cm (approx 17mL) is treated as noise/zero
-                if (used_h < 0.3f) {
-                    used_h = 0;
-                    s_dispensed_ml = 0;
-                } else {
-                    s_dispensed_ml = used_h * TANK_AREA_CM2;
+                // Adaptive finish: 
+                // 1. Must wait at least MIN_MS
+                // 2. Either surface is stable OR we reached MAX_MS timeout
+                if (elapsed >= STABILITY_MIN_MS && (is_stable || elapsed >= STABILITY_MAX_MS)) {
+                    if (elapsed >= STABILITY_MAX_MS && !is_stable) {
+                        ESP_LOGW(TAG, "Stabilization timeout reached (%.2f cm spread)", 
+                                 s_water_filter.get_spread());
+                    }
+
+                    // Calculate based on the centrally managed current volume
+                    float final_h = (WATER_CRITICAL_CM - s_water_distance_cm);
+                    float initial_h = (WATER_CRITICAL_CM - s_initial_water_cm);
+                    
+                    if (s_last_action == VolumeAction::DISPENSED) {
+                        float used_h = initial_h - final_h;
+                        // Hardening: Any used height < 0.3cm (approx 17mL) is treated as noise/zero
+                        if (used_h < 0.3f) used_h = 0;
+                        s_dispensed_ml = used_h * TANK_AREA_CM2;
+                    } else {
+                        // Level increases = distance decreases
+                        float added_h = final_h - initial_h; 
+                        if (added_h < 0) added_h = 0;
+                        s_dispensed_ml = added_h * TANK_AREA_CM2;
+                    }
+                    
+                    s_calc_finish_ms = esp_log_timestamp();
+                    s_state = SystemState::STATE_CALCULATING;
                 }
-                
-                s_last_action = VolumeAction::DISPENSED;
-                s_calc_finish_ms = esp_log_timestamp();
-                s_state = SystemState::STATE_CALCULATING;
             }
             break;
 
@@ -732,17 +777,10 @@ static void control_task(void *pvParams) {
                 if (s_water_distance_cm > WATER_CRITICAL_CM || s_water_distance_cm <= 0) {
                     ESP_LOGW(TAG, "Refill exit blocked: Water level still critical (%.1f cm)", s_water_distance_cm);
                 } else {
-                    float final_h = (WATER_CRITICAL_CM - s_water_distance_cm);
-                    float initial_h = (WATER_CRITICAL_CM - s_initial_water_cm);
-                    // Level increases = distance decreases
-                    float added_h = final_h - initial_h; 
-                    if (added_h < 0) added_h = 0;
-                    
-                    s_dispensed_ml = added_h * TANK_AREA_CM2;
-                    s_last_action = VolumeAction::ADDED;
                     s_calc_finish_ms = esp_log_timestamp();
-                    s_state = SystemState::STATE_SHOW_RESULT;
-                    ESP_LOGI(TAG, "→ IDLE: Refill finished, Added: %.1f mL", s_dispensed_ml);
+                    s_last_action = VolumeAction::ADDED;
+                    s_state = SystemState::STATE_STABILIZING;
+                    ESP_LOGI(TAG, "→ STABILIZING: Refill finished, settling water...");
                 }
             }
             break;
@@ -790,7 +828,7 @@ static void lcd_task(void *pvParams) {
 
         case SystemState::STATE_STABILIZING:
             snprintf(line0, sizeof(line0), "PLEASE WAIT...  ");
-            snprintf(line1, sizeof(line1), "Stabilizing H2O ");
+            snprintf(line1, sizeof(line1), "Ripple: %.2f cm", s_water_filter.get_spread());
             break;
 
         case SystemState::STATE_CALCULATING:
