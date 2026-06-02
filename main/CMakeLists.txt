@@ -7,8 +7,10 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
-        esp-mqtt
+        espressif__mqtt
         esp_http_client
         hcsr04
         i2c_lcd
+    PRIV_REQUIRES
+        esp_driver_touch_sens
 )

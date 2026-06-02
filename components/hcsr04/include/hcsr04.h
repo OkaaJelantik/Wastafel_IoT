@@ -119,7 +119,7 @@ private:
      * @param user_ctx Pointer to the owning HCSR04 instance (`this`)
      * @return false — no high-priority task is woken
      */
-    static bool IRAM_ATTR capture_callback(
+    static bool capture_callback(
         mcpwm_cap_channel_handle_t cap_chan,
         const mcpwm_capture_event_data_t *edata,
         void *user_ctx);

@@ -47,9 +47,10 @@
 #include "esp_http_client.h"
 
 /* ── Peripheral Drivers ────────────────────────────────────────────── */
+#define TOUCH_PAD_VERSION_SUPPRESS_DEPRECATION_WARNING
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
-#include "driver/touch_pad.h"
+#include "driver/touch_sens.h"
 
 /* ── Project Components ────────────────────────────────────────────── */
 #include "hcsr04.h"
@@ -187,6 +188,9 @@ static void buffer_telemetry(float hand_dist, float water_dist, bool pump,
 /* ═══════════════════════════════════════════════════════════════════
  *  GLOBAL STATE VARIABLES
  * ═══════════════════════════════════════════════════════════════════ */
+
+static touch_sensor_handle_t s_touch_handle = NULL;
+static touch_channel_handle_t s_chan_handle = NULL;
 
 // ── Hardware Instances ──
 static HCSR04  *s_hand_sensor  = nullptr;
@@ -465,14 +469,45 @@ static void pump_set(bool on) {
     gpio_set_level(RELAY_PIN, on ? 1 : 0);
 }
 
+#define TOUCH_PAD_VERSION_SUPPRESS_DEPRECATION_WARNING
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "driver/touch_sens.h"
+
+// Define for compatibility if still needed
+#include "hal/touch_sensor_legacy_types.h"
+
 /**
  * @brief Initialize the capacitive touch pad for refill mode trigger
  */
 static void touch_init(void) {
-    ESP_ERROR_CHECK(touch_pad_init());
-    ESP_ERROR_CHECK(touch_pad_set_fsm_mode(TOUCH_FSM_MODE_TIMER));
-    ESP_ERROR_CHECK(touch_pad_config(TOUCH_REFILL_PAD, TOUCH_THRESHOLD));
-    ESP_ERROR_CHECK(touch_pad_filter_start(10));  // 10ms filter period
+    touch_sensor_config_t sens_cfg = {
+        .power_on_wait_us = 256,
+        .meas_interval_us = 320.0,
+        .intr_trig_mode = TOUCH_INTR_TRIG_ON_BELOW_THRESH,
+        .intr_trig_group = TOUCH_INTR_TRIG_GROUP_BOTH,
+        .sample_cfg_num = 1,
+        .sample_cfg = (touch_sensor_sample_config_t[]) {
+            {
+                .charge_duration_ms = 5.0,
+                .charge_volt_lim_h = TOUCH_VOLT_LIM_H_1V7,
+                .charge_volt_lim_l = TOUCH_VOLT_LIM_L_0V5,
+            }
+        }
+    };
+    ESP_ERROR_CHECK(touch_sensor_new_controller(&sens_cfg, &s_touch_handle));
+
+    touch_channel_config_t chan_cfg = {
+        .abs_active_thresh = {TOUCH_THRESHOLD},
+        .charge_speed = TOUCH_CHARGE_SPEED_7,
+        .init_charge_volt = TOUCH_INIT_CHARGE_VOLT_DEFAULT,
+        .group = TOUCH_CHAN_TRIG_GROUP_BOTH,
+    };
+    ESP_ERROR_CHECK(touch_sensor_new_channel(s_touch_handle, TOUCH_REFILL_PAD, &chan_cfg, &s_chan_handle));
+    
+    ESP_ERROR_CHECK(touch_sensor_enable(s_touch_handle));
+    ESP_ERROR_CHECK(touch_sensor_start_continuous_scanning(s_touch_handle));
+    
     ESP_LOGI(TAG, "Touch pad initialized on GPIO%d (PAD%d)",
              TOUCH_REFILL_GPIO, TOUCH_REFILL_PAD);
 }
@@ -481,8 +516,9 @@ static void touch_init(void) {
  * @brief Read touch pad and return true if touched
  */
 static bool touch_is_pressed(void) {
-    uint16_t value = 0;
-    touch_pad_read_filtered(TOUCH_REFILL_PAD, &value);
+    if (!s_chan_handle) return false;
+    uint32_t value = 0;
+    ESP_ERROR_CHECK(touch_channel_read_data(s_chan_handle, TOUCH_CHAN_DATA_TYPE_RAW, &value));
     return (value < TOUCH_THRESHOLD);
 }
 
@@ -839,19 +875,19 @@ extern "C" void app_main(void) {
     /* ── 2. Initialize Hardware ──────────────────────────────────── */
     lcd_init();          // I2C LCD display
     sensors_init();      // HC-SR04 ultrasonic sensors (A + B)
-    relay_init();        // Pump relay
-    touch_init();        // Touch pad for refill mode
+    // relay_init();        // Pump relay
+    // touch_init();        // Touch pad for refill mode
 
     /* ── 3. Initialize WiFi (non-blocking) ───────────────────────── */
-    wifi_init_sta();
+    // wifi_init_sta();
 
     /* ── 4. Update LCD with "Ready" message after init ───────────── */
     vTaskDelay(pdMS_TO_TICKS(500));
     s_lcd->clear();
     s_lcd->set_cursor(0, 0);
     s_lcd->print("System Ready");
-    s_lcd->set_cursor(0, 1);
-    s_lcd->print("Connecting WiFi");
+    // s_lcd->set_cursor(0, 1);
+    // s_lcd->print("Connecting WiFi");
 
     /* ── 5. Launch FreeRTOS Tasks ────────────────────────────────── */
 
@@ -860,16 +896,16 @@ extern "C" void app_main(void) {
                             nullptr, 0);
 
     // Control task — runs state machine at 10 Hz
-    xTaskCreatePinnedToCore(control_task, "control", 4096, nullptr, 4,
-                            nullptr, 0);
+    // xTaskCreatePinnedToCore(control_task, "control", 4096, nullptr, 4,
+    //                         nullptr, 0);
 
     // LCD task — updates display at 2 Hz
     xTaskCreatePinnedToCore(lcd_task,     "lcd",     4096, nullptr, 3,
                             nullptr, 0);
 
     // IoT task — MQTT + Blynk telemetry (runs on Core 1 for network isolation)
-    xTaskCreatePinnedToCore(iot_task,     "iot",     8192, nullptr, 2,
-                            nullptr, 1);
+    // xTaskCreatePinnedToCore(iot_task,     "iot",     8192, nullptr, 2,
+    //                         nullptr, 1);
 
     ESP_LOGI(TAG, "All tasks launched — system running");
 }

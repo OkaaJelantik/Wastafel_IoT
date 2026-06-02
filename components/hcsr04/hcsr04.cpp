@@ -68,7 +68,7 @@ HCSR04::HCSR04(gpio_num_t trig_pin, gpio_num_t echo_pin, int group_id)
  *
  * The edge type is determined by edata->cap_edge.
  */
-bool IRAM_ATTR HCSR04::capture_callback(
+bool HCSR04::capture_callback(
     mcpwm_cap_channel_handle_t cap_chan,
     const mcpwm_capture_event_data_t *edata,
     void *user_ctx)
@@ -127,7 +127,6 @@ esp_err_t HCSR04::init()
     cap_ch_cfg.prescale        = 1;           // No additional prescaling
     cap_ch_cfg.flags.neg_edge  = true;        // Capture falling edge
     cap_ch_cfg.flags.pos_edge  = true;        // Capture rising edge
-    cap_ch_cfg.flags.pull_up   = true;        // Enable internal pull-up
     ESP_RETURN_ON_ERROR(
         mcpwm_new_capture_channel(_cap_timer, &cap_ch_cfg, &_cap_channel),
         TAG, "Failed to create capture channel on GPIO %d", _echo_pin);
