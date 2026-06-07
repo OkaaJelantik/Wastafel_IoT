@@ -1,21 +1,40 @@
-# ORCHESTRA.md: Master Vision & Architecture
+# Wastafel_RRQSahabatan: Orkestra Sistem
 
-This document acts as the central hub for the `Wastafel_RRQSahabatan` project, defining the core architectural vision and system-level guidelines.
+## Ringkasan Eksekutif & Filosofi Sistem
 
-## 1. Project Vision
-*   **Project Name**: Wastafel_RRQSahabatan
-*   **Core Purpose**: Implementasi matkul Sensor & IoT.
-*   **Fundamental Philosophy**: Data Stability. Real-time sensor data (especially HC-SR04) is inherently volatile. The system must decouple raw sensor ingestion from actionable logic (UI/Database reporting).
+"Wastafel_RRQSahabatan" bukan sekadar implementasi sensorik, melainkan perwujudan keandalan sistem tertanam (embedded systems) pada skala IoT. Filosofi kami berpijak pada integritas data di atas segalanya:
 
-## 2. Core Concepts
-*   **Calculated vs Real-time**:
-    *   **Trigger Actions (Pump/Safety)**: Use raw/filtered real-time data for immediate response.
-    *   **Reporting (UI/DB)**: Use stabilized, calculated values to prevent artifacts (e.g., negative volume during ripples).
-*   **Threading Isolation**: Calculation tasks are isolated from the main control loop, ensuring sensor noise does not cause system-level misbehavior.
+*   **Stabilitas Data**: Mengubah data sensor yang fluktuatif menjadi insight yang stabil dan presisi.
+*   **Isolasi Thread**: Menjamin keamanan eksekusi sistem dengan memisahkan domain akuisisi data, pengolahan, dan antarmuka.
+*   **Keandalan IoT**: Membangun konektivitas tangguh yang mampu bertahan dalam lingkungan dinamis dengan latensi minimal.
 
-## 3. System Components
-*   [HARDWARE.md](./HARDWARE.md): Pinout and hardware integration strategies.
-*   [MAIN_FLOW.md](./MAIN_FLOW.md): State machine and threading logic.
-*   [IOT_SPEC.md](./IOT_SPEC.md): Telemetry and cloud communication.
-*   [DISPLAY_SPEC.md](./DISPLAY_SPEC.md): UI feedback strategies.
-*   [DATA_PROCESSING.md](./DATA_PROCESSING.md): Filtering and calculation algorithms.
+Seluruh komponen sistem diorkestrasi untuk memastikan setiap milidetik waktu eksekusi berkontribusi pada stabilitas dan akurasi fungsional.
+
+---
+
+## Indeks Utama
+
+Berikut adalah direktori pusat untuk mendalami arsitektur dan spesifikasi sistem:
+
+- [Arsitektur Alur Utama](./MAIN_FLOW.md): Inti operasional, state machine, dan manajemen siklus hidup sistem.
+- [Hardware Abstraction Layer](./HARDWARE.md): Spesifikasi integrasi perangkat keras dan pinout.
+- [Spesifikasi Konektivitas IoT](./IOT_SPEC.md): Protokol telemetri dan integrasi cloud.
+- [Spesifikasi Layanan Sistem](./SERVICES_SPEC.md): Algoritma filtrasi data, kalkulasi, dan antarmuka feedback visual.
+
+---
+
+## Perjalanan Pengguna: Panduan Navigasi
+
+Tergantung pada peran dan fokus Anda dalam proyek ini, berikut adalah titik masuk yang direkomendasikan:
+
+### 1. Arsitek / Insinyur Perangkat Keras
+Fokus pada integritas sinyal dan konektivitas perangkat.
+*   **Prioritas**: [Hardware Abstraction Layer](./HARDWARE.md) -> [Arsitektur Alur Utama](./MAIN_FLOW.md)
+
+### 2. Insinyur IoT / Jaringan
+Fokus pada aliran data dari perangkat ke platform cloud.
+*   **Prioritas**: [Spesifikasi Konektivitas IoT](./IOT_SPEC.md) -> [Logika Pemrosesan Data](./DATA_PROCESSING.md)
+
+### 3. Pengembang Aplikasi / Sistem
+Fokus pada alur kontrol, logika aplikasi, dan keandalan sistem secara keseluruhan.
+*   **Prioritas**: [Arsitektur Alur Utama](./MAIN_FLOW.md) -> [Logika Pemrosesan Data](./DATA_PROCESSING.md)
