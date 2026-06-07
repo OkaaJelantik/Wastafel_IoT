@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "driver/i2c_master.h"
 #include "include/pins.h"
+#include "../data_processing/include/data_processing.h"
 
 static const char *DISP_TAG = "DISP_SVC";
 
@@ -25,10 +26,6 @@ static constexpr int STATE_CALCULATING = 3;
 static constexpr int STATE_SHOW_RESULT = 4;
 static constexpr int STATE_CRITICAL    = 5;
 static constexpr int STATE_REFILL      = 6;
-
-/* ── Physical constants mirrored from data_processing ── */
-static constexpr float DISP_WATER_CRITICAL_CM = 16.0f;
-static constexpr float DISP_TANK_AREA_CM2     = 56.72f;
 
 /* ── Static Member Definitions ── */
 I2C_LCD *DisplayService::s_lcd       = nullptr;
@@ -85,9 +82,9 @@ void DisplayService::update(int state, const DisplayData &data) {
 
     case STATE_IDLE: {
         // Derive a friendly remaining-capacity figure for the idle screen
-        float height_cm = DISP_WATER_CRITICAL_CM - data.water_distance_cm;
+        float height_cm = WATER_CRITICAL_CM - data.water_distance_cm;
         if (height_cm < 0) height_cm = 0;
-        float vol_ml = height_cm * DISP_TANK_AREA_CM2;
+        float vol_ml = height_cm * TANK_AREA_CM2;
 
         snprintf(line0, sizeof(line0), "SYSTEM READY    ");
         snprintf(line1, sizeof(line1), "Capacity:%4.0f mL", vol_ml);
@@ -117,7 +114,7 @@ void DisplayService::update(int state, const DisplayData &data) {
         break;
 
     case STATE_REFILL:
-        if (data.water_distance_cm > DISP_WATER_CRITICAL_CM
+        if (data.water_distance_cm > WATER_CRITICAL_CM
                 || data.water_distance_cm <= 0) {
             snprintf(line0, sizeof(line0), "!! LOW WATER !! ");
             snprintf(line1, sizeof(line1), "PLEASE REFILL   ");

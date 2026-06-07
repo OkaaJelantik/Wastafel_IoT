@@ -50,6 +50,8 @@ struct IoTTelemetryEntry {
     float   water_cm;
     bool    pump_on;
     int     state;
+    float   vol_ml;
+    float   delta_ml;
     int64_t timestamp_ms;
 };
 
@@ -83,7 +85,7 @@ public:
      * @param state  Cast SystemState as int (avoid enum coupling)
      */
     static void publish(float hand_cm, float water_cm,
-                        bool pump_on, SystemStateInt state);
+                        bool pump_on, SystemStateInt state, float vol_ml, float delta_ml);
 
     // ── Status Queries ──────────────────────────────────────────────
     static bool is_wifi_connected() { return s_wifi_connected; }
@@ -100,16 +102,16 @@ private:
                                       int32_t id, void *data);
     static void   _mqtt_init();
     static void   _mqtt_publish_live(float hand_cm, float water_cm,
-                                     bool pump_on, SystemStateInt state);
+                                     bool pump_on, SystemStateInt state, float vol_ml, float delta_ml);
     static void   _mqtt_flush_offline_buffer();
 
     // Blynk
     static void   _blynk_push(float hand_cm, float water_cm,
-                               bool pump_on, SystemStateInt state);
+                               bool pump_on, SystemStateInt state, float vol_ml, float delta_ml);
 
     // Offline ring buffer
     static void   _buffer_entry(float hand_cm, float water_cm,
-                                 bool pump_on, SystemStateInt state);
+                                 bool pump_on, SystemStateInt state, float vol_ml, float delta_ml);
 
     // ── Static State ─────────────────────────────────────────────────
     static EventGroupHandle_t        s_wifi_event_group;

@@ -20,7 +20,6 @@ static constexpr float    HAND_ON_THRESHOLD     = 15.0f;  // [Unit: cm]
 static constexpr float    HAND_OFF_THRESHOLD    = 22.0f;  // [Unit: cm]
 static constexpr uint32_t HAND_OFF_TIMEOUT_MS   = 500;
 
-static constexpr float    WATER_CRITICAL_CM     = 16.0f;  // [Unit: cm]
 static constexpr float    WATER_LOW_CM          = 12.0f;  // [Unit: cm]
 
 static constexpr float    STABILITY_THRESHOLD_CM = 0.15f; // [Unit: cm]
@@ -102,7 +101,7 @@ static void sensor_task(void *pvParams) {
     }
 }
 
-// [LABEL: STATE_PUMPING]
+// [STATE_PUMPING]
 static void logic_handle_pumping() {
     if (is_water_level_critical()) {
         pump_set(false);
@@ -129,7 +128,7 @@ static void logic_handle_pumping() {
     }
 }
 
-// [LABEL: STATE_STABILIZING]
+// [STATE_STABILIZING]
 static void logic_handle_stabilizing() {
     if (is_hand_detected()) {
         pump_set(true);
@@ -174,7 +173,7 @@ static void control_task(void *pvParams) {
 
         switch (s_state) {
 
-        // [LABEL: STATE_IDLE]
+        // [STATE_IDLE]
         case SystemState::STATE_IDLE:
             pump_set(false);
 
@@ -205,7 +204,7 @@ static void control_task(void *pvParams) {
             logic_handle_stabilizing();
             break;
 
-        // [LABEL: STATE_CALCULATING]
+        // [STATE_CALCULATING]
         case SystemState::STATE_CALCULATING:
             if (is_hand_detected()) {
                 pump_set(true);
@@ -218,7 +217,7 @@ static void control_task(void *pvParams) {
             }
             break;
 
-        // [LABEL: STATE_SHOW_RESULT]
+        // [STATE_SHOW_RESULT]
         case SystemState::STATE_SHOW_RESULT:
             if (is_hand_detected()) {
                 pump_set(true);
@@ -234,7 +233,7 @@ static void control_task(void *pvParams) {
             s_state = SystemState::STATE_IDLE;
             break;
 
-        // [LABEL: STATE_REFILL]
+        // [STATE_REFILL]
         case SystemState::STATE_REFILL:
             pump_set(false);
 
@@ -269,19 +268,20 @@ static void lcd_task(void *pvParams) {
     }
 }
 
+// [IOT_TASK]
 static void iot_task(void *pvParams) {
     TickType_t last_mqtt  = xTaskGetTickCount();
     TickType_t last_blynk = xTaskGetTickCount();
-
-    IoTService::run_task(nullptr);
 
     while (true) {
         TickType_t now = xTaskGetTickCount();
 
         if ((now - last_mqtt) >= pdMS_TO_TICKS(MQTT_PUBLISH_INTERVAL_MS)) {
             last_mqtt = now;
+            float vol_ml = s_current_vol_ml;
+            float delta_ml = s_dispensed_ml;
             IoTService::publish(s_hand_distance_cm, s_water_distance_cm,
-                                s_pump_on, static_cast<int>(s_state));
+                                s_pump_on, static_cast<int>(s_state), vol_ml, delta_ml);
         }
 
         if ((now - last_blynk) >= pdMS_TO_TICKS(BLYNK_PUSH_INTERVAL_MS)) {
@@ -293,6 +293,7 @@ static void iot_task(void *pvParams) {
 }
 
 extern "C" void app_main(void) {
+    // [APP_MAIN]
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -304,6 +305,9 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(hw.init());
     ESP_ERROR_CHECK(DisplayService::init());
 
+    // [IOT_INIT]
+    ESP_ERROR_CHECK(IoTService::init());
+
     vTaskDelay(pdMS_TO_TICKS(500));
     DisplayService::show_ready();
 
@@ -312,6 +316,10 @@ extern "C" void app_main(void) {
     xTaskCreatePinnedToCore(control_task, "control", 4096, nullptr, 4,
                             nullptr, 0);
     xTaskCreatePinnedToCore(lcd_task,     "lcd",     4096, nullptr, 3,
+                            nullptr, 0);
+    xTaskCreatePinnedToCore(IoTService::run_task, "iot_net", 4096, nullptr, 2,
+                            nullptr, 1);
+    xTaskCreatePinnedToCore(iot_task,     "iot_pub", 4096, nullptr, 2,
                             nullptr, 0);
 
     ESP_LOGI(TAG, "All tasks launched — system running.");

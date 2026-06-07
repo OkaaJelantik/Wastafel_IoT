@@ -100,16 +100,16 @@ void IoTService::run_task(void *pvParams) {
  * ══════════════════════════════════════════════════════════════════ */
 
 void IoTService::publish(float hand_cm, float water_cm,
-                         bool pump_on, SystemStateInt state) {
+                         bool pump_on, SystemStateInt state, float vol_ml, float delta_ml) {
     if (s_mqtt_connected) {
         // Flush any data buffered during a prior outage first
         if (s_offline_count > 0) {
             _mqtt_flush_offline_buffer();
         }
-        _mqtt_publish_live(hand_cm, water_cm, pump_on, state);
+        _mqtt_publish_live(hand_cm, water_cm, pump_on, state, vol_ml, delta_ml);
     } else {
         // No connectivity — store for later retransmission
-        _buffer_entry(hand_cm, water_cm, pump_on, state);
+        _buffer_entry(hand_cm, water_cm, pump_on, state, vol_ml, delta_ml);
         ESP_LOGD(IOT_TAG, "Buffered entry (%d/%d)",
                  s_offline_count, IOT_OFFLINE_BUFFER_SIZE);
     }
@@ -218,7 +218,7 @@ void IoTService::_mqtt_init() {
  *        Topic: wastafel/{device_id}/telemetry
  */
 void IoTService::_mqtt_publish_live(float hand_cm, float water_cm,
-                                    bool pump_on, SystemStateInt state) {
+                                    bool pump_on, SystemStateInt state, float vol_ml, float delta_ml) {
     if (!s_mqtt_connected) return;
 
     char topic[64];
@@ -241,10 +241,11 @@ void IoTService::_mqtt_publish_live(float hand_cm, float water_cm,
     char payload[256];
     snprintf(payload, sizeof(payload),
              "{\"hand_cm\":%.1f,\"water_cm\":%.1f,"
-             "\"pump\":%s,\"state\":\"%s\",\"uptime_ms\":%lld}",
+             "\"pump\":%s,\"state\":\"%s\",\"vol_ml\":%.1f,\"delta_ml\":%.1f,\"uptime_ms\":%lld}",
              hand_cm, water_cm,
              pump_on ? "true" : "false",
              state_str,
+             vol_ml, delta_ml,
              static_cast<long long>(esp_log_timestamp()));
 
     esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 1, 0);
@@ -273,10 +274,11 @@ void IoTService::_mqtt_flush_offline_buffer() {
         char payload[256];
         snprintf(payload, sizeof(payload),
                  "{\"hand_cm\":%.1f,\"water_cm\":%.1f,"
-                 "\"pump\":%s,\"state\":%d,\"ts_ms\":%lld}",
+                 "\"pump\":%s,\"state\":%d,\"vol_ml\":%.1f,\"delta_ml\":%.1f,\"ts_ms\":%lld}",
                  e.hand_cm, e.water_cm,
                  e.pump_on ? "true" : "false",
                  e.state,
+                 e.vol_ml, e.delta_ml,
                  static_cast<long long>(e.timestamp_ms));
 
         if (esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 0, 0) >= 0) {
@@ -296,18 +298,19 @@ void IoTService::_mqtt_flush_offline_buffer() {
  * ══════════════════════════════════════════════════════════════════ */
 
 void IoTService::_blynk_push(float hand_cm, float water_cm,
-                              bool pump_on, SystemStateInt state) {
+                              bool pump_on, SystemStateInt state, float vol_ml, float delta_ml) {
     const char *auth = CONFIG_WASTAFEL_BLYNK_AUTH;
     if (auth[0] == '\0' || !s_wifi_connected) return;
 
     char url[256];
     snprintf(url, sizeof(url),
              "https://%s/external/api/batch/update"
-             "?token=%s&V0=%.1f&V1=%.1f&V2=%d&V3=%d",
+             "?token=%s&V0=%.1f&V1=%.1f&V2=%d&V3=%d&V4=%.1f&V5=%.1f",
              CONFIG_WASTAFEL_BLYNK_SERVER, auth,
              hand_cm, water_cm,
              pump_on ? 1 : 0,
-             state);
+             state,
+             vol_ml, delta_ml);
 
     esp_http_client_config_t http_cfg = {};
     http_cfg.url        = url;
@@ -328,12 +331,14 @@ void IoTService::_blynk_push(float hand_cm, float water_cm,
  * ══════════════════════════════════════════════════════════════════ */
 
 void IoTService::_buffer_entry(float hand_cm, float water_cm,
-                                bool pump_on, SystemStateInt state) {
+                                bool pump_on, SystemStateInt state, float vol_ml, float delta_ml) {
     IoTTelemetryEntry &e = s_offline_buffer[s_offline_head];
     e.hand_cm      = hand_cm;
     e.water_cm     = water_cm;
     e.pump_on      = pump_on;
     e.state        = state;
+    e.vol_ml       = vol_ml;
+    e.delta_ml     = delta_ml;
     e.timestamp_ms = esp_log_timestamp();
 
     s_offline_head = (s_offline_head + 1) % IOT_OFFLINE_BUFFER_SIZE;
