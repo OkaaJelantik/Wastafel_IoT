@@ -11,6 +11,10 @@ idf_component_register(
         esp_http_client
         hcsr04
         i2c_lcd
+        hardware_manager
+        display_service
+        iot_service
+        data_processing
     PRIV_REQUIRES
         esp_driver_touch_sens
 )

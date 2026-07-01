@@ -23,7 +23,7 @@
 #include "driver/gpio.h"
 #include "driver/touch_pad.h"
 #include "hcsr04.h"
-#include "include/pins.h"
+#include "pins.h"
 
 class HardwareManager {
 public:

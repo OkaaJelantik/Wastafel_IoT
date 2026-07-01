@@ -13,8 +13,8 @@
 
 #include "esp_log.h"
 #include "driver/i2c_master.h"
-#include "include/pins.h"
-#include "../data_processing/include/data_processing.h"
+#include "pins.h"
+#include "data_processing.h"
 
 static const char *DISP_TAG = "DISP_SVC";
 
